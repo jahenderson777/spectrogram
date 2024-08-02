@@ -1,5 +1,6 @@
 #include "Plugin.h"
 #include <iostream>
+#include <cstring>
 
 
 namespace
@@ -30,7 +31,7 @@ const clap_plugin* createPluginInstance(const clap_plugin_factory* /*factory*/, 
 {
     if (strcmp(plugin_id, Plugin::descriptor.id))
     {
-        std::cerr << "Error: plugin_id '" << plugin_id << "' not found!" << std::endl;
+        std::cerr << "Error: plugin_id '" << plugin_id << " " << Plugin::descriptor.id << "' not found!" << std::endl;
         return nullptr;
     }
 
