@@ -12,8 +12,8 @@
 
 
 // GUI size.
-#define GUI_WIDTH (1024)
-#define GUI_HEIGHT (1024)
+#define GUI_WIDTH (512)
+#define GUI_HEIGHT (512)
 
 
 class Plugin : public clap::helpers::Plugin<clap::helpers::MisbehaviourHandler::Terminate,
@@ -32,14 +32,14 @@ public:
     static constexpr clap_plugin_descriptor descriptor =
     {
         .clap_version = CLAP_VERSION,
-        .id = "org.earthics.ClapPluginCppTemplate",
-        .name = "Name of the plugin",
+        .id = "org.earthics.Spectrogram",
+        .name = "Spectrogram",
         .vendor = "Alexander Henderson",
         .url = "https://earthics.org",
         .manual_url = "",
         .support_url = "",
         .version = "1.0.0",
-        .description = "A short description of your plugin",
+        .description = "Spectrogram",
         .features = features
     };
 
@@ -163,8 +163,8 @@ private:
     static const size_t bufferSize = 2048 * 16; // Adjust the size as needed
 
     
-    const int fftSize = 4096;
-    const int fftOverlap = fftSize / 8;
+    const int fftSize = 2048;// 4096;
+    const int fftOverlap = fftSize / 4;
     int fftX;
     std::vector<float> fftBuffer; //(fftSize, 0.0f);
     FFTSetup fftSetup;
@@ -190,5 +190,9 @@ private:
 
     uint32_t mapValueToColor(float value);
     uint32_t getMatlabRgb(float ordinal);
+
+    int filterLength = 101;
+    float* filter;
+    void createLowPassFIRFilter();
 
 };

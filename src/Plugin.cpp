@@ -31,6 +31,9 @@ Plugin::Plugin(const clap_host* host)
     fftPrevMagnitudes = (float*)malloc(fftSize/2 * sizeof(float));
     fftMagnitudes = (float*)malloc(fftSize/2 * sizeof(float));
 
+    filter = (float*)malloc(filterLength * sizeof(float));
+    createLowPassFIRFilter();
+
     vDSP_hann_window(fftWindow, fftSize, vDSP_HANN_NORM);
 }
 
@@ -43,6 +46,7 @@ Plugin::~Plugin()
     free(fftBufferWindowed);
     free(fftPrevMagnitudes);
     free(fftMagnitudes);
+    free(filter);
 }
 
 bool Plugin::init() noexcept {
@@ -171,6 +175,8 @@ clap_process_status Plugin::process(const clap_process* process) noexcept
 
             // Check for note-on message
             if (status == 0x90 && velocity > 0) {
+                if (gui && gui->bits) 
+                    paintRectangle(gui->bits, fftX, GUI_WIDTH, 0, GUI_HEIGHT, 0x000000, 0x000000);
                 bufferIndex = 0; // Reset buffer index on note-on
                 fftX = 0;
                 //std::fill(audioBuffer.begin(), audioBuffer.end(), 0.0f); // Clear the buffer
@@ -200,11 +206,18 @@ clap_process_status Plugin::process(const clap_process* process) noexcept
             remaining -= toCopy;
 
             if (bufferIndex == fftSize) {
+
+                // Do 16 512 fft's and plot each
+
+
                 // Apply window
                 // vDSP_vmul(fftBuffer.data(), 1, fftWindow, 1, fftBuffer.data(), 1, fftSize);
                 for (size_t i = 0; i < fftSize; ++i) {
                     fftBufferWindowed[i] = fftBuffer.data()[i] * fftWindow[i];
                 }
+
+                //vDSP_desamp(fftBuffer.data(), 1.0f, filter, fftBufferWindowed, fftSize, filterLength);
+
                 
                 // Perform FFT
                 vDSP_ctoz((DSPComplex*)fftBufferWindowed, 2, &fftResult, 1, fftSize / 2);
@@ -218,8 +231,8 @@ clap_process_status Plugin::process(const clap_process* process) noexcept
                 
                 // Generate grayscale strip
                 //paintVerticalLine(gui->bits, fftX, magnitudes, fftSize / 2);
-                paintInterpolatedVerticalLines(gui->bits, fftX, fftPrevMagnitudes, fftMagnitudes, fftSize / 2, 6);
-                fftX += 6;
+                paintInterpolatedVerticalLines(gui->bits, fftX, fftPrevMagnitudes, fftMagnitudes, fftSize / 2, 3);
+                fftX += 3;
 
                 for (size_t i = 0; i < fftSize / 2; ++i) {
                     fftPrevMagnitudes[i] = fftMagnitudes[i];
@@ -235,6 +248,27 @@ clap_process_status Plugin::process(const clap_process* process) noexcept
 
     return CLAP_PROCESS_CONTINUE;
 }
+
+
+/*
+bandStart = 5120
+bandEnd = 20480
+numLines = 8
+
+while bandEnd >= 20
+    apply a 512 window to the samples
+    apply a 512 fft to the samples
+    plot the fft result, bandStart, bandEnd, fftResult, fftX, numLines
+    low pass filter the samples
+    reduce sample rate by 4
+    bandStart *= 0.25
+    bandEnd *= 0.25
+
+// Slide buffer for overlap
+std::copy(fftBuffer.begin() + fftOverlap, fftBuffer.end(), fftBuffer.begin());
+bufferIndex = fftSize - fftOverlap;
+
+*/
 
 /*void Plugin::paintVerticalLine(uint32_t* bits, size_t x, const float* magnitudes, size_t numBins, uint32_t width, uint32_t height) {
     for (size_t y = 0; y < GUI_HEIGHT; ++y) {
@@ -330,7 +364,7 @@ void Plugin::paintVerticalLine(uint32_t* bits, size_t x, const float* magnitudes
 }
 
 void Plugin::paintInterpolatedVerticalLines(uint32_t* bits, size_t x, const float* prevMagnitudes, const float* currMagnitudes, size_t numBins, size_t numLines) {
-    const float minFrequency = 20.0f;
+    const float minFrequency = 25.0f;
     const float maxFrequency = 20000.0f;
 
     const float minMel = hertzToMel(minFrequency);
@@ -357,9 +391,12 @@ void Plugin::paintInterpolatedVerticalLines(uint32_t* bits, size_t x, const floa
             float currLowMag = currMagnitudes[binIndexLow];
             float currHighMag = currMagnitudes[binIndexHigh];
             float yInterpolationFactor = linearBinIndex - binIndexLow;
+            if (yInterpolationFactor < 0.0f) 
+                yInterpolationFactor = 0.0f;
+            else if (yInterpolationFactor > 1.0f) yInterpolationFactor = 1.0f;
 
-            float prevMag = (1.0f - yInterpolationFactor) * prevLowMag + yInterpolationFactor * prevHighMag;
-            float currMag = (1.0f - yInterpolationFactor) * currLowMag + yInterpolationFactor * currHighMag;
+            float prevMag = prevLowMag;// (1.0f - yInterpolationFactor) * prevLowMag + yInterpolationFactor * prevHighMag;
+            float currMag = currLowMag;// (1.0f - yInterpolationFactor) * currLowMag + yInterpolationFactor * currHighMag;
             float mag = (1.0f - xInterpolationFactor) * prevMag + xInterpolationFactor * currMag;
             float normalizedMag = (1.2f + (float)y * 0.4f / (float)GUI_HEIGHT) * mag / 140.0f;
             //normalizedMag = std::pow(normalizedMag, 0.25);
@@ -369,7 +406,7 @@ void Plugin::paintInterpolatedVerticalLines(uint32_t* bits, size_t x, const floa
             else if (normalizedMag > 1.0f) normalizedMag = 1.0f;
 
 
-            const tinycolormap::Color c = tinycolormap::GetColor(normalizedMag, tinycolormap::ColormapType::Inferno);
+            const tinycolormap::Color c = tinycolormap::GetColor(normalizedMag, tinycolormap::ColormapType::Turbo);
             uint32_t color = ((uint8_t)(c.b() * 255.0f) << 16) | ((uint8_t)(c.g() * 255.0f) << 8) | (uint8_t)(c.r() * 255.0f);
 
             size_t pixelIndex = (GUI_HEIGHT - y - 1) * GUI_WIDTH + x + i;
@@ -387,7 +424,8 @@ void Plugin::paintRectangle(uint32_t *bits, uint32_t l, uint32_t r, uint32_t t, 
 }
 
 void Plugin::paint(uint32_t *bits) {
-	//paintRectangle(bits, 0, GUI_WIDTH, 0, GUI_HEIGHT, 0xC0C0C0, 0xC0C0C0);
+    //if (fftX <= 3)
+	    //paintRectangle(bits, 0, GUI_WIDTH, 0, GUI_HEIGHT, 0x000000, 0x000000);
 
         // Draw the waveform
     std::lock_guard<std::mutex> lock(bufferMutex);
@@ -590,4 +628,19 @@ uint32_t Plugin::getMatlabRgb(float ordinal)
     g = (ordinal < -0.5) ? (uint8_t)((ordinal + 1) / 0.5 * 255) : (ordinal > 0.5) ? (uint8_t)(255 - ((ordinal - 0.5) / 0.5 * 255)) : (uint8_t)255;
     b = (ordinal > 0.0)  ? (uint8_t)0 : (ordinal <= -0.5) ? (uint8_t)255 : (uint8_t)(ordinal * -1.0 / 0.5 * 255);
     return (r << 16) | (g << 8) | b;
+}
+
+// Function to create a low-pass FIR filter using a windowed sinc function
+void Plugin::createLowPassFIRFilter() {
+    float normalizedCutoff = 0.25;
+    float M = filterLength - 1.0;
+    for (int i = 0; i < filterLength; ++i) {
+        if (i == M / 2.0) {
+            filter[i] = normalizedCutoff;
+        } else {
+            filter[i] = normalizedCutoff * (sin(M_PI * normalizedCutoff * (i - M / 2.0)) / (M_PI * normalizedCutoff * (i - M / 2.0)));
+        }
+        // Apply a Hann window
+        filter[i] *= 0.5 * (1.0 - cos(2.0 * M_PI * i / M));
+    }
 }
