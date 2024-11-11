@@ -13,5 +13,10 @@ cmake --build build     # plugin will be at './build/ClapPluginCppTemplate.clap'
 - macOS only for now
 - contributions are welcome!
 
+##
+gcc -c src/gui_mac.m -g
+
+
+
 ## License
 MIT

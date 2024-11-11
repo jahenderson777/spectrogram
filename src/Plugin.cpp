@@ -584,7 +584,6 @@ void Plugin::startAnimationLoop(int fps) {
     animationThread = std::thread([this, interval]() {
         while (running) {
             std::this_thread::sleep_for(interval);
-            //GUIPaint(this, true); 
             (void) std::async(std::launch::async, [this] { 
                 GUIPaint(this, true); 
             });
