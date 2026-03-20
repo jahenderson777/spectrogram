@@ -26,7 +26,9 @@ spectrogram_plugin/
 ├── cmake/
 │   ├── Dependencies.cmake      # FetchContent for clap + clap-helpers
 │   └── Spectrogram.plist.in    # macOS bundle plist template
+├── build_number.txt            # Auto-incrementing build number (persisted across builds)
 └── src/
+    ├── build_number.h          # Generated — #define BUILD_NUMBER N (gitignored)
     ├── Factory.cpp             # CLAP entry point; registers the plugin
     ├── Plugin.h                # Plugin class declaration
     ├── Plugin.cpp              # Plugin logic: audio processing, FFT, painting
@@ -40,12 +42,12 @@ spectrogram_plugin/
 
 ### Key third-party dependencies (fetched by CMake)
 
-| Library | Source | Role |
-|---------|--------|------|
-| `clap` | github.com/free-audio/clap | CLAP C API headers |
-| `clap-helpers` | github.com/free-audio/clap-helpers | C++ plugin/host wrappers |
-| Apple **Accelerate** | system framework | vDSP FFT (macOS only) |
-| **tinycolormap** | vendored in `src/` | Turbo/Magma/Jet colormaps |
+| Library              | Source                             | Role                      |
+| -------------------- | ---------------------------------- | ------------------------- |
+| `clap`               | github.com/free-audio/clap         | CLAP C API headers        |
+| `clap-helpers`       | github.com/free-audio/clap-helpers | C++ plugin/host wrappers  |
+| Apple **Accelerate** | system framework                   | vDSP FFT (macOS only)     |
+| **tinycolormap**     | vendored in `src/`                 | Turbo/Magma/Jet colormaps |
 
 ---
 
@@ -103,12 +105,12 @@ Called by the host on the real-time audio thread.  It:
 
 **FFT parameters:**
 
-| Parameter | Value |
-|-----------|-------|
-| FFT size | 2048 samples |
-| Overlap | 512 samples (75%) |
-| Window | Hann (normalised) |
-| Columns per FFT | 3 (interpolated) |
+| Parameter       | Value             |
+| --------------- | ----------------- |
+| FFT size        | 2048 samples      |
+| Overlap         | 512 samples (75%) |
+| Window          | Hann (normalised) |
+| Columns per FFT | 3 (interpolated)  |
 
 ### GUI / paint thread
 
@@ -152,28 +154,6 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
 
 ### ✅ Fixed
 
-1. **Stray `BB` prefix on `Plugin.cpp` line 1** — removed, committed
-   (`279dcdc`).
-
-2. **`getFactory` returned the plugin factory for any ID** — `Factory.cpp`
-   was unconditionally returning `&factoryStruct` regardless of the
-   `factory_id` argument.  This caused crashes (SIGSEGV, exit 139) when hosts
-   tried to query unknown factories (e.g. preset-discovery).  Fixed by
-   checking `factory_id == CLAP_PLUGIN_FACTORY_ID` and returning `nullptr`
-   otherwise.
-
-3. **`jetColormap` / `mapValueToColor` failed to compile** — `static constexpr`
-   array initialised with a lambda that called `std::abs` on floats, which is
-   not `constexpr` in Apple's libc++.  Both were dead code; removed entirely.
-
-4. **Precompiled `gui_mac.o` in CMake** — added `OBJC` (and `C`) to the
-   project languages and listed `src/gui_mac.m` directly in `add_library(...)`,
-   removing the `set(GUI_OBJ ...)` workaround.
-
-5. **Slow scan time** — moved FFT setup (`vDSP_create_fftsetup`), buffer
-   allocations, and Hann window computation from the constructor to
-   `activate()`, with teardown in `deactivate()`.  Scan time dropped from
-   ~236 ms to ~14 ms.
 
 
 
@@ -286,14 +266,14 @@ before loading the plugin in a DAW.
 
 ## File-by-File Reference
 
-| File | Purpose | Thread context |
-|------|---------|----------------|
-| `Factory.cpp` | CLAP DLL entry; creates `Plugin` instances | init/host thread |
-| `Plugin.h` | Class declaration, FFT state, constants | — |
-| `Plugin.cpp` | All plugin logic: audio, FFT, painting | audio + GUI threads |
-| `Utils.h` | dB/gain conversions; pure functions, no state | any |
-| `gui_mac.cpp` | Bridges `Plugin` ↔ Cocoa; `#include`d into `Plugin.cpp` | GUI thread |
-| `gui_mac.m` | `NSView` subclass: pixel-buffer rendering + mouse input | main/GUI thread |
-| `tinycolormap.hpp` | Lookup-table colormaps (Turbo, Magma, Jet…); header-only | any |
-| `cmake/Dependencies.cmake` | FetchContent for clap + clap-helpers | build time |
-| `cmake/Spectrogram.plist.in` | macOS bundle metadata template | build time |
+| File                         | Purpose                                                  | Thread context      |
+| ---------------------------- | -------------------------------------------------------- | ------------------- |
+| `Factory.cpp`                | CLAP DLL entry; creates `Plugin` instances               | init/host thread    |
+| `Plugin.h`                   | Class declaration, FFT state, constants                  | —                   |
+| `Plugin.cpp`                 | All plugin logic: audio, FFT, painting                   | audio + GUI threads |
+| `Utils.h`                    | dB/gain conversions; pure functions, no state            | any                 |
+| `gui_mac.cpp`                | Bridges `Plugin` ↔ Cocoa; `#include`d into `Plugin.cpp`  | GUI thread          |
+| `gui_mac.m`                  | `NSView` subclass: pixel-buffer rendering + mouse input  | main/GUI thread     |
+| `tinycolormap.hpp`           | Lookup-table colormaps (Turbo, Magma, Jet…); header-only | any                 |
+| `cmake/Dependencies.cmake`   | FetchContent for clap + clap-helpers                     | build time          |
+| `cmake/Spectrogram.plist.in` | macOS bundle metadata template                           | build time          |

@@ -8,6 +8,20 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flax-vector-conversions")
 
 include(cmake/Dependencies.cmake)
 
+# --- Auto-incrementing build number ---
+# Generate an initial build_number.h so the first configure works
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/src/build_number.h")
+    file(WRITE "${CMAKE_SOURCE_DIR}/src/build_number.h" "#pragma once\n#define BUILD_NUMBER 0\n")
+endif()
+
+add_custom_target(increment_build_number ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DBUILD_NUMBER_FILE=${CMAKE_SOURCE_DIR}/build_number.txt
+        -DOUTPUT_HEADER=${CMAKE_SOURCE_DIR}/src/build_number.h
+        -P ${CMAKE_SOURCE_DIR}/cmake/increment_build_number.cmake
+    COMMENT "Incrementing build number..."
+)
+
 add_library(${PROJECT_NAME} MODULE
     src/Utils.h
     src/Plugin.h
@@ -15,6 +29,8 @@ add_library(${PROJECT_NAME} MODULE
     src/Factory.cpp
     src/gui_mac.m
 )
+
+add_dependencies(${PROJECT_NAME} increment_build_number)
 
 target_link_libraries(${PROJECT_NAME} PUBLIC clap clap-helpers)
 target_link_libraries(Spectrogram PRIVATE "-framework Accelerate")

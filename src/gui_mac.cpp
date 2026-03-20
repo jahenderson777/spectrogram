@@ -1,3 +1,6 @@
+#include "build_number.h"
+#include <cstdio>
+
 #define GUI_API CLAP_WINDOW_API_COCOA
 
 struct GUI {
@@ -9,10 +12,17 @@ extern "C" void *MacInitialise(Plugin *plugin, uint32_t *bits, uint32_t width, u
 extern "C" void MacDestroy(void *mainView);
 extern "C" void MacSetParent(void *_mainView, void *_parentView);
 extern "C" void MacSetVisible(void *_mainView, bool show);
+extern "C" void MacSetDebugText(void *_mainView, const char *text);
 extern "C" void MacPaint(void *_mainView);
 
 static void GUIPaint(Plugin *plugin, bool internal) {
 	if (internal) plugin->paint(plugin->gui->bits);
+
+	// Update debug overlay text
+	char debugBuf[128];
+	snprintf(debugBuf, sizeof(debugBuf), "build #%d", BUILD_NUMBER);
+	MacSetDebugText(plugin->gui->mainView, debugBuf);
+
 	MacPaint(plugin->gui->mainView);
 }
 

@@ -10,6 +10,7 @@ void MacInputEvent(struct MyPlugin *plugin, int32_t cursorX, int32_t cursorY, in
 @property (nonatomic) uint32_t width;
 @property (nonatomic) uint32_t height;
 @property (nonatomic) BOOL hasSuperView;
+@property (nonatomic, copy) NSString *debugText;
 @end
 
 @implementation MainView
@@ -18,6 +19,15 @@ void MacInputEvent(struct MyPlugin *plugin, int32_t cursorX, int32_t cursorY, in
 	NSDrawBitmap(self.bounds, _width, _height, 8 /* bits per channel */, 4 /* channels per pixel */, 32 /* bits per pixel */,
 			4 * _width /* bytes per row */, NO /* planar */, NO /* has alpha */, 
 			NSDeviceRGBColorSpace /* color space */, &data /* data */);
+
+	// Draw debug text overlay (green, top-left)
+	if (_debugText) {
+		NSDictionary *attrs = @{
+			NSFontAttributeName: [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular],
+			NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.0 green:1.0 blue:0.0 alpha:0.85],
+		};
+		[_debugText drawAtPoint:NSMakePoint(4, _height - 16) withAttributes:attrs];
+	}
 }
 
 - (BOOL)acceptsFirstMouse:(NSEvent *)event {
@@ -69,6 +79,11 @@ void MacSetParent(void *_mainView, void *_parentView) {
 void MacSetVisible(void *_mainView, bool show) {
 	MainView *mainView = (MainView *) _mainView;
 	[mainView setHidden:(show ? NO : YES)];
+}
+
+void MacSetDebugText(void *_mainView, const char *text) {
+	MainView *mainView = (MainView *) _mainView;
+	mainView.debugText = [NSString stringWithUTF8String:text];
 }
 
 void MacPaint(void *_mainView) {
