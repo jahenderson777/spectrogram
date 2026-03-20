@@ -55,30 +55,27 @@ ClapPluginCppTemplate/
 - CMake ≥ 3.25
 - Internet access on first build (FetchContent clones clap and clap-helpers)
 
-### Compile the Objective-C file first (one-time step)
+### Step 1 — Compile the Objective-C file
 
-The macOS GUI is written in Objective-C (`gui_mac.m`).  CMakeLists.txt currently
-adds `gui_mac.o` as a **precompiled object** rather than letting CMake compile
-the `.m` file directly.  You must regenerate this object whenever `gui_mac.m`
-changes:
+`CMakeLists.txt` currently adds `src/gui_mac.o` as a **precompiled object**
+rather than letting CMake compile `gui_mac.m` directly (known issue #2 below).
+You must regenerate this object whenever `gui_mac.m` changes:
 
 ```bash
 # From the repo root
-clang -x objective-c -fobjc-arc -c src/gui_mac.m -o src/gui_mac.o
+gcc -c src/gui_mac.m -g -o src/gui_mac.o
 ```
 
-### Configure and build
+### Step 2 — Configure and build
 
 ```bash
-mkdir -p build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Debug
-make -j$(sysctl -n hw.ncpu)
+cmake -S . -B build
+cmake --build build
 ```
 
 Output: `build/ClapPluginCppTemplate.clap/` (macOS bundle)
 
-### Install for testing
+### Step 3 — Install for testing
 
 ```bash
 cp -r build/ClapPluginCppTemplate.clap ~/Library/Audio/Plug-Ins/CLAP/
@@ -117,7 +114,8 @@ Called by the host on the real-time audio thread.  It:
 The plugin spawns a background thread (`animationThread`) at 10 fps that calls
 `GUIPaint`, which forwards to `plugin->paint()` and then schedules a Cocoa
 `setNeedsDisplay`.  `Plugin::paint` currently only acquires `bufferMutex`; the
-actual spectrogram data is written by the audio thread.
+actual spectrogram data is written by the audio thread directly into the pixel
+buffer inside `process()`.
 
 ### Pixel buffer
 
@@ -145,146 +143,124 @@ Range: 25 Hz (bottom) → 20 000 Hz (top).
 (1.2f + y * 0.4f / GUI_HEIGHT) * mag / 140.0f + 0.4f
 ```
 
-This adds a frequency-dependent brightness boost and a floor offset.
+This adds a frequency-dependent brightness boost and a constant floor offset.
 
 ---
 
-## Known Issues & Technical Debt
+## Status of Known Issues
 
-These are things that should be fixed before treating the plugin as production-ready:
+### ✅ Fixed
 
-1. **Typo in Plugin.cpp line 1**: `BB#include "Plugin.h"` — the leading `BB`
-   is stray text and must be removed.  The file currently compiles only because
-   the precompiled `gui_mac.o` (which includes this file via CMake) was built
-   before the typo was introduced, or the compiler silently skips it somehow.
-   **Fix**: delete the `BB` prefix.
+1. **Stray `BB` prefix on `Plugin.cpp` line 1** — removed, committed
+   (`279dcdc`).
+
+### 🔴 Open — Build / Infrastructure
 
 2. **Precompiled `gui_mac.o` in CMake**: `CMakeLists.txt` references
-   `src/gui_mac.o` as a precompiled object.  This means changes to `gui_mac.m`
-   are silently ignored until the object is manually rebuilt.  **Fix**: teach
-   CMake to compile the `.m` file directly (see "Recommended Fixes" below).
+   `src/gui_mac.o` as a pre-built object.  Changes to `gui_mac.m` are silently
+   ignored until the object is manually rebuilt.
+   **Fix**: add `enable_language(OBJC)` to CMakeLists.txt and list
+   `src/gui_mac.m` directly in `add_library(...)`, removing the
+   `set(GUI_OBJ ...)` workaround.
 
-3. **Win32 / X11 stubs are broken**: `gui_w32.cpp` and `gui_x11.cpp` reference
-   `MyPlugin`, `PluginPaint`, `PluginProcessMouseDrag`, etc. — names that no
-   longer exist.  They are copy-pasted from a template and have not been adapted
-   to the `Plugin` class.
+### 🔴 Open — Correctness
 
-4. **Gain parameter is a no-op**: The plugin exposes a "Gain" parameter to the
-   host (automatable, with dB display) but never applies it to the audio.
+3. **Thread safety of the pixel buffer**: The audio thread writes to
+   `gui->bits` (holding `bufferMutex`), and the Cocoa `drawRect` reads from it
+   on the main thread without any lock.
+   **Fix**: use a double-buffer (ping-pong), or extend `bufferMutex` coverage
+   to include `drawRect` reads.
 
-5. **`audioBuffer` is unused**: A 32 768-sample circular buffer is allocated and
-   its mutex is locked during FFT, but audio samples are written to `fftBuffer`
-   instead.  `audioBuffer` can be removed.
+4. **`fftBuffer` only resized in `guiCreate`**: If the host calls `process()`
+   before `guiCreate()` (legal in CLAP), `fftBuffer` is empty.  The
+   `if (gui && gui->bits)` guard prevents a crash but silently drops audio data.
+   **Fix**: resize `fftBuffer` in `activate()` and reset `bufferIndex = 0` there.
 
-6. **`fftBuffer` only resized in `guiCreate`**: If the host calls `process()`
-   before `guiCreate()` (legal in CLAP), `fftBuffer` is empty and `gui` is
-   null — the `if (gui && gui->bits)` guard prevents a crash, but FFT data is
-   lost until the GUI opens.  **Fix**: resize `fftBuffer` in `activate()`.
-
-7. **`filter` / `createLowPassFIRFilter` is unused**: A 101-tap windowed-sinc
-   FIR filter is allocated and computed but the `vDSP_desamp` call is commented
-   out.
-
-8. **Thread safety of the pixel buffer**: The audio thread writes to
-   `gui->bits` (holding `bufferMutex`), and the GUI thread reads from it
-   (without holding any lock) inside `MacPaint → drawRect`.  A double-buffer
-   or read lock is needed for correctness.
-
-9. **`std::async` inside animation thread**: `startAnimationLoop` launches
+5. **`std::async` misuse in animation loop**: `startAnimationLoop` fires
    `GUIPaint` via `std::async(std::launch::async, ...)` but discards the
-   returned `std::future`.  The future destructor blocks until the async task
-   finishes, which can cause the paint call to overlap with the next tick if
-   painting is slow.  **Fix**: call `GUIPaint` directly, or use a `dispatch`
-   queue on macOS.
+   `std::future`.  The discarded future's destructor blocks until completion,
+   which can cause overlapping paint calls if the frame takes longer than the
+   interval.
+   **Fix**: call `GUIPaint` directly in the loop body (it only calls
+   `setNeedsDisplayInRect`, which is cheap and thread-safe on macOS).
 
-10. **Large pile of commented-out code**: Several alternative `paintVerticalLine`
-    implementations, a waveform renderer, and a multi-band FFT sketch are left
-    commented out in `Plugin.cpp`.  These should be either deleted or moved to
-    a separate branch.
+### 🟡 Open — Dead Code / Cleanliness
+
+6. **`audioBuffer` is allocated but never used**: A 32 768-sample circular
+   buffer and its mutex exist but audio samples go directly into `fftBuffer`.
+   **Fix**: remove `audioBuffer`, `bufferSize`, and the related `bufferMutex`
+   lock in `paint()` (replace with a dedicated `fftMutex` if needed).
+
+7. **`filter` / `createLowPassFIRFilter` is unused**: A 101-tap FIR filter is
+   computed in the constructor but the `vDSP_desamp` call is commented out.
+   **Fix**: remove both if there's no near-term plan to use them.
+
+8. **Large pile of commented-out code**: Several alternative
+   `paintVerticalLine` implementations, a waveform renderer, and a multi-band
+   FFT sketch remain in `Plugin.cpp`.
+   **Fix**: delete them (they're in git history if ever needed).
+
+9. **Unused variables generating compiler warnings**: `note`, `nextEvent`,
+   `prevHighMag`, `currHighMag`, `verticalScale` — all flagged by `-Wunused`.
+   **Fix**: remove or use each one.
+
+### 🟡 Open — Missing Features
+
+10. **Gain parameter is a no-op**: The plugin exposes a "Gain" parameter with
+    proper dB display but never applies it to the audio signal.
+    **Fix**: after the pass-through copy in `process()`, multiply output samples
+    by `gain_` (use `vDSP_vsmul`).
+
+11. **Win32 / X11 GUI stubs are broken**: `gui_w32.cpp` and `gui_x11.cpp`
+    reference `MyPlugin`, `PluginPaint`, `PluginProcessMouseDrag`, etc. —
+    names that no longer exist.  They are copy-pasted from an older template.
 
 ---
 
-## Recommended Fixes (Priority Order)
+## Recommended Next Steps (Priority Order)
 
-### 1. Fix the `BB` typo in Plugin.cpp
+1. **Fix CMake to compile `gui_mac.m` directly** (issue #2) — eliminates the
+   fragile manual compile step and makes the build fully reproducible.
 
-```cpp
-// Line 1 of Plugin.cpp — change:
-BB#include "Plugin.h"
-// to:
-#include "Plugin.h"
-```
+2. **Clean up dead code** (issues #6, #7, #8) — makes the file readable.
 
-### 2. Compile gui_mac.m via CMake
+3. **Fix compiler warnings** (issue #9) — remove unused variables.
 
-Add to `CMakeLists.txt`:
+4. **Move `fftBuffer` resize to `activate()`** (issue #4).
 
-```cmake
-# Enable Objective-C
-enable_language(OBJC)
+5. **Fix the animation loop** (issue #5) — drop the `std::async` wrapper.
 
-add_library(${PROJECT_NAME} MODULE
-    src/Utils.h
-    src/Plugin.h
-    src/Plugin.cpp
-    src/Factory.cpp
-    src/gui_mac.m          # ← compile directly, not as precompiled object
-)
-```
-
-Remove the `set(GUI_OBJ src/gui_mac.o)` line and the `${GUI_OBJ}` reference.
-
-### 3. Move fftBuffer resize to activate()
-
-```cpp
-bool Plugin::activate(double sampleRate, uint32_t, uint32_t maxFrameCount) noexcept {
-    fftBuffer.resize(fftSize, 0.0f);   // ← add this
-    bufferIndex = 0;
-    // ... existing fade-length calculation ...
-    return true;
-}
-```
-
-### 4. Apply gain in process()
-
-```cpp
-// After the pass-through copy loop in process():
-if (gain_ != 1.0) {
-    for (uint32_t ch = 0; ch < outputChannelsCount; ++ch)
-        vDSP_vsmul(output[ch], 1, &gain_, output[ch], 1, process->frames_count);
-}
-```
+6. **Add double-buffering** (issue #3) — the most involved fix; needed for
+   correctness under a strict host.
 
 ---
 
 ## Code Style
 
 - C++20; 4-space indentation.
-- Member variables: trailing underscore for private (`gain_`, `fftX` is an
-  exception — should be `fftX_`).
+- Private member variables use a trailing underscore (`gain_`); `fftX` is an
+  exception that should eventually become `fftX_`.
 - No exceptions in audio-thread code (`noexcept` everywhere in CLAP callbacks).
-- Prefer `std::` containers over raw `malloc`/`free` in new code; the existing
-  FFT buffers use `malloc` for vDSP alignment compatibility — keep that pattern
-  for vDSP data, but document it.
+- FFT/vDSP buffers use raw `malloc`/`free` for alignment compatibility with
+  vDSP — keep that pattern for vDSP data, but prefer `std::vector` everywhere
+  else.
 - Prefer `static_cast` over C-style casts.
 
 ---
 
 ## Testing
 
-There is no automated test suite.  Manual testing procedure:
+No automated test suite.  Manual procedure:
 
-1. Build the plugin (see "Building" above).
-2. Install to `~/Library/Audio/Plug-Ins/CLAP/`.
-3. Open a CLAP host (e.g. [Clap-Info](https://github.com/free-audio/clap-info),
-   [Bitwig Studio](https://www.bitwig.com/), or
-   [REAPER](https://www.reaper.fm/) with the CLAP extension).
-4. Insert the plugin on an audio track and verify:
+1. Build and install (see "Building" above).
+2. Open a CLAP host (e.g. [Bitwig Studio](https://www.bitwig.com/),
+   [REAPER](https://www.reaper.fm/) with the CLAP extension, or
+   [clap-info](https://github.com/free-audio/clap-info) for quick validation).
+3. Insert the plugin on an audio track and verify:
    - The spectrogram scrolls left-to-right as audio plays.
-   - Frequencies are displayed on a mel-like scale (low frequencies at bottom,
-     high at top).
-   - A MIDI note-on event resets the display.
-   - Audio passes through without audible artifacts.
+   - Frequencies appear on a mel-like scale (bass at bottom, highs at top).
+   - A MIDI note-on event clears and resets the display.
+   - Audio passes through without audible artefacts.
 
 ---
 
@@ -294,10 +270,10 @@ There is no automated test suite.  Manual testing procedure:
 |------|---------|----------------|
 | `Factory.cpp` | CLAP DLL entry; creates `Plugin` instances | init/host thread |
 | `Plugin.h` | Class declaration, FFT state, constants | — |
-| `Plugin.cpp` | All plugin logic including audio processing, FFT, painting | audio + GUI threads |
+| `Plugin.cpp` | All plugin logic: audio, FFT, painting | audio + GUI threads |
 | `Utils.h` | dB/gain conversions; pure functions, no state | any |
-| `gui_mac.cpp` | Bridges Plugin ↔ Cocoa; `#include`d into Plugin.cpp | GUI thread |
-| `gui_mac.m` | `NSView` subclass for pixel-buffer rendering and mouse input | main/GUI thread |
-| `tinycolormap.hpp` | Lookup-table colormaps; header-only, no state | any |
-| `cmake/Dependencies.cmake` | FetchContent declarations for clap + clap-helpers | build time |
+| `gui_mac.cpp` | Bridges `Plugin` ↔ Cocoa; `#include`d into `Plugin.cpp` | GUI thread |
+| `gui_mac.m` | `NSView` subclass: pixel-buffer rendering + mouse input | main/GUI thread |
+| `tinycolormap.hpp` | Lookup-table colormaps (Turbo, Magma, Jet…); header-only | any |
+| `cmake/Dependencies.cmake` | FetchContent for clap + clap-helpers | build time |
 | `cmake/ClapPluginCppTemplate.plist.in` | macOS bundle metadata template | build time |
