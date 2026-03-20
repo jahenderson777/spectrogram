@@ -19,11 +19,13 @@ A real-time **spectrogram visualiser** implemented as a [CLAP](https://cleveraud
 ## Repository Layout
 
 ```
-ClapPluginCppTemplate/
+spectrogram_plugin/
 ├── CMakeLists.txt              # Root build file
+├── AGENTS.md                   # This file
+├── README.md                   # User-facing documentation
 ├── cmake/
 │   ├── Dependencies.cmake      # FetchContent for clap + clap-helpers
-│   └── ClapPluginCppTemplate.plist.in   # macOS bundle plist template
+│   └── Spectrogram.plist.in    # macOS bundle plist template
 └── src/
     ├── Factory.cpp             # CLAP entry point; registers the plugin
     ├── Plugin.h                # Plugin class declaration
@@ -31,6 +33,7 @@ ClapPluginCppTemplate/
     ├── Utils.h                 # dB <-> gain helpers (header-only)
     ├── gui_mac.cpp             # macOS GUI glue (C++, included into Plugin.cpp)
     ├── gui_mac.m               # Cocoa NSView implementation (Objective-C)
+    ├── gui_mac.o               # Precompiled gui_mac.m object (must be rebuilt manually)
     ├── gui_w32.cpp             # Win32 GUI stub (NOT currently buildable)
     ├── gui_x11.cpp             # X11 GUI stub (NOT currently buildable)
     └── tinycolormap.hpp        # Header-only colormap library (MIT, vendored)
@@ -73,13 +76,23 @@ cmake -S . -B build
 cmake --build build
 ```
 
-Output: `build/ClapPluginCppTemplate.clap/` (macOS bundle)
+Output: `build/Spectrogram.clap/` (macOS bundle)
 
 ### Step 3 — Install for testing
 
 ```bash
-cp -r build/ClapPluginCppTemplate.clap ~/Library/Audio/Plug-Ins/CLAP/
+cmake --install build
 ```
+
+This copies `Spectrogram.clap` to `~/Library/Audio/Plug-Ins/CLAP/` (defined in
+`CMakeLists.txt` via `install(DIRECTORY ...)`).  After installing, trigger a
+plugin rescan in your DAW.
+
+**Note on the legacy bundle**: A second copy is kept at
+`~/Library/Audio/Plug-Ins/CLAP/ClapPluginCppTemplate.clap` for compatibility
+with any Bitwig projects that were saved when the plugin had the old template
+name.  It is identical to `Spectrogram.clap` and must be updated manually
+alongside it (`cp -r ~/Library/Audio/Plug-Ins/CLAP/Spectrogram.clap ~/Library/Audio/Plug-Ins/CLAP/ClapPluginCppTemplate.clap`).
 
 ---
 
@@ -154,29 +167,45 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
 1. **Stray `BB` prefix on `Plugin.cpp` line 1** — removed, committed
    (`279dcdc`).
 
+2. **`getFactory` returned the plugin factory for any ID** — `Factory.cpp`
+   was unconditionally returning `&factoryStruct` regardless of the
+   `factory_id` argument.  This caused crashes (SIGSEGV, exit 139) when hosts
+   tried to query unknown factories (e.g. preset-discovery).  Fixed by
+   checking `factory_id == CLAP_PLUGIN_FACTORY_ID` and returning `nullptr`
+   otherwise.
+
+3. **`jetColormap` / `mapValueToColor` failed to compile** — `static constexpr`
+   array initialised with a lambda that called `std::abs` on floats, which is
+   not `constexpr` in Apple's libc++.  Both were dead code; removed entirely.
+
 ### 🔴 Open — Build / Infrastructure
 
-2. **Precompiled `gui_mac.o` in CMake**: `CMakeLists.txt` references
+4. **Precompiled `gui_mac.o` in CMake**: `CMakeLists.txt` references
    `src/gui_mac.o` as a pre-built object.  Changes to `gui_mac.m` are silently
    ignored until the object is manually rebuilt.
    **Fix**: add `enable_language(OBJC)` to CMakeLists.txt and list
    `src/gui_mac.m` directly in `add_library(...)`, removing the
    `set(GUI_OBJ ...)` workaround.
 
+5. **Slow scan time**: `clap-validator` reports ~264 ms to scan, exceeding the
+   100 ms target.  Likely caused by `vDSP_create_fftsetup` running in the
+   constructor, which is called during metadata scanning.
+   **Fix**: move FFT setup to `activate()` and tear it down in `deactivate()`.
+
 ### 🔴 Open — Correctness
 
-3. **Thread safety of the pixel buffer**: The audio thread writes to
+6. **Thread safety of the pixel buffer**: The audio thread writes to
    `gui->bits` (holding `bufferMutex`), and the Cocoa `drawRect` reads from it
    on the main thread without any lock.
    **Fix**: use a double-buffer (ping-pong), or extend `bufferMutex` coverage
    to include `drawRect` reads.
 
-4. **`fftBuffer` only resized in `guiCreate`**: If the host calls `process()`
+7. **`fftBuffer` only resized in `guiCreate`**: If the host calls `process()`
    before `guiCreate()` (legal in CLAP), `fftBuffer` is empty.  The
    `if (gui && gui->bits)` guard prevents a crash but silently drops audio data.
    **Fix**: resize `fftBuffer` in `activate()` and reset `bufferIndex = 0` there.
 
-5. **`std::async` misuse in animation loop**: `startAnimationLoop` fires
+8. **`std::async` misuse in animation loop**: `startAnimationLoop` fires
    `GUIPaint` via `std::async(std::launch::async, ...)` but discards the
    `std::future`.  The discarded future's destructor blocks until completion,
    which can cause overlapping paint calls if the frame takes longer than the
@@ -186,32 +215,32 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
 
 ### 🟡 Open — Dead Code / Cleanliness
 
-6. **`audioBuffer` is allocated but never used**: A 32 768-sample circular
+9. **`audioBuffer` is allocated but never used**: A 32 768-sample circular
    buffer and its mutex exist but audio samples go directly into `fftBuffer`.
    **Fix**: remove `audioBuffer`, `bufferSize`, and the related `bufferMutex`
    lock in `paint()` (replace with a dedicated `fftMutex` if needed).
 
-7. **`filter` / `createLowPassFIRFilter` is unused**: A 101-tap FIR filter is
-   computed in the constructor but the `vDSP_desamp` call is commented out.
-   **Fix**: remove both if there's no near-term plan to use them.
+10. **`filter` / `createLowPassFIRFilter` is unused**: A 101-tap FIR filter is
+    computed in the constructor but the `vDSP_desamp` call is commented out.
+    **Fix**: remove both if there's no near-term plan to use them.
 
-8. **Large pile of commented-out code**: Several alternative
-   `paintVerticalLine` implementations, a waveform renderer, and a multi-band
-   FFT sketch remain in `Plugin.cpp`.
-   **Fix**: delete them (they're in git history if ever needed).
+11. **Large pile of commented-out code**: Several alternative
+    `paintVerticalLine` implementations, a waveform renderer, and a multi-band
+    FFT sketch remain in `Plugin.cpp`.
+    **Fix**: delete them (they're in git history if ever needed).
 
-9. **Unused variables generating compiler warnings**: `note`, `nextEvent`,
-   `prevHighMag`, `currHighMag`, `verticalScale` — all flagged by `-Wunused`.
-   **Fix**: remove or use each one.
+12. **Unused variables generating compiler warnings**: `note`, `nextEvent`,
+    `prevHighMag`, `currHighMag`, `verticalScale` — all flagged by `-Wunused`.
+    **Fix**: remove or use each one.
 
 ### 🟡 Open — Missing Features
 
-10. **Gain parameter is a no-op**: The plugin exposes a "Gain" parameter with
+13. **Gain parameter is a no-op**: The plugin exposes a "Gain" parameter with
     proper dB display but never applies it to the audio signal.
     **Fix**: after the pass-through copy in `process()`, multiply output samples
     by `gain_` (use `vDSP_vsmul`).
 
-11. **Win32 / X11 GUI stubs are broken**: `gui_w32.cpp` and `gui_x11.cpp`
+14. **Win32 / X11 GUI stubs are broken**: `gui_w32.cpp` and `gui_x11.cpp`
     reference `MyPlugin`, `PluginPaint`, `PluginProcessMouseDrag`, etc. —
     names that no longer exist.  They are copy-pasted from an older template.
 
@@ -219,18 +248,19 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
 
 ## Recommended Next Steps (Priority Order)
 
-1. **Fix CMake to compile `gui_mac.m` directly** (issue #2) — eliminates the
+1. **Fix CMake to compile `gui_mac.m` directly** (issue #4) — eliminates the
    fragile manual compile step and makes the build fully reproducible.
 
-2. **Clean up dead code** (issues #6, #7, #8) — makes the file readable.
+2. **Clean up dead code** (issues #9, #10, #11) — makes the file readable.
 
-3. **Fix compiler warnings** (issue #9) — remove unused variables.
+3. **Fix compiler warnings** (issue #12) — remove unused variables.
 
-4. **Move `fftBuffer` resize to `activate()`** (issue #4).
+4. **Move FFT setup and `fftBuffer` resize to `activate()`** (issues #5, #7) —
+   fixes scan-time warning and the missing-buffer edge case together.
 
-5. **Fix the animation loop** (issue #5) — drop the `std::async` wrapper.
+5. **Fix the animation loop** (issue #8) — drop the `std::async` wrapper.
 
-6. **Add double-buffering** (issue #3) — the most involved fix; needed for
+6. **Add double-buffering** (issue #6) — the most involved fix; needed for
    correctness under a strict host.
 
 ---
@@ -250,14 +280,31 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
 
 ## Testing
 
-No automated test suite.  Manual procedure:
+### Automated — clap-validator
+
+[clap-validator](https://github.com/free-audio/clap-validator) exercises the
+plugin's CLAP API conformance without needing a DAW.  A copy lives at
+`~/Library/Audio/Plug-Ins/CLAP/clap-validator`.
+
+```bash
+~/Library/Audio/Plug-Ins/CLAP/clap-validator validate build/Spectrogram.clap
+```
+
+Expected result: **0 failures** (some tests are skipped because the plugin does
+not implement optional extensions like `clap.state`).  There is currently one
+warning about scan time exceeding 100 ms (see issue #5).
+
+Run this after any change to `Factory.cpp`, `Plugin.h`, or the CLAP entry point
+before loading the plugin in a DAW.
+
+### Manual — Bitwig Studio
 
 1. Build and install (see "Building" above).
-2. Open a CLAP host (e.g. [Bitwig Studio](https://www.bitwig.com/),
-   [REAPER](https://www.reaper.fm/) with the CLAP extension, or
-   [clap-info](https://github.com/free-audio/clap-info) for quick validation).
-3. Insert the plugin on an audio track and verify:
-   - The spectrogram scrolls left-to-right as audio plays.
+2. Open [Bitwig Studio](https://www.bitwig.com/) and rescan plugins
+   (**Settings → Plug-ins → Rescan**) if the plugin does not appear.
+3. Insert **Spectrogram** (or **ClapPluginCppTemplate** for legacy projects) on
+   an audio track and verify:
+   - The spectrogram window opens and scrolls left-to-right as audio plays.
    - Frequencies appear on a mel-like scale (bass at bottom, highs at top).
    - A MIDI note-on event clears and resets the display.
    - Audio passes through without audible artefacts.
@@ -276,4 +323,4 @@ No automated test suite.  Manual procedure:
 | `gui_mac.m` | `NSView` subclass: pixel-buffer rendering + mouse input | main/GUI thread |
 | `tinycolormap.hpp` | Lookup-table colormaps (Turbo, Magma, Jet…); header-only | any |
 | `cmake/Dependencies.cmake` | FetchContent for clap + clap-helpers | build time |
-| `cmake/ClapPluginCppTemplate.plist.in` | macOS bundle metadata template | build time |
+| `cmake/Spectrogram.plist.in` | macOS bundle metadata template | build time |
