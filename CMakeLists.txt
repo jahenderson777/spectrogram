@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(Spectrogram LANGUAGES CXX VERSION 1.0.0)
+project(Spectrogram LANGUAGES C CXX OBJC VERSION 1.0.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,15 +8,12 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flax-vector-conversions")
 
 include(cmake/Dependencies.cmake)
 
-# Add the object file
-set(GUI_OBJ src/gui_mac.o)
-
 add_library(${PROJECT_NAME} MODULE
     src/Utils.h
     src/Plugin.h
     src/Plugin.cpp
     src/Factory.cpp
-    ${GUI_OBJ} # Include the precompiled GUI object file
+    src/gui_mac.m
 )
 
 target_link_libraries(${PROJECT_NAME} PUBLIC clap clap-helpers)

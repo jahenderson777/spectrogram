@@ -85,6 +85,7 @@ public:
     bool paramsTextToValue(clap_id paramId, const char* display, double* value) noexcept override;
 
     bool activate(double sampleRate, uint32_t, uint32_t) noexcept override;
+    void deactivate() noexcept override;
 
     clap_process_status process(const clap_process* process) noexcept override;
 
@@ -128,6 +129,13 @@ public:
     void startAnimationLoop(int fps);
     void stopAnimationLoop();
 
+    //---------------------//
+    // clap_plugin_state    //
+    //---------------------//
+    bool implementsState() const noexcept override { return true; }
+    bool stateSave(const clap_ostream *stream) noexcept override;
+    bool stateLoad(const clap_istream *stream) noexcept override;
+
     bool implementsNotePorts() const noexcept override
     {
         return true;
@@ -167,12 +175,12 @@ private:
     const int fftOverlap = fftSize / 4;
     int fftX;
     std::vector<float> fftBuffer; //(fftSize, 0.0f);
-    FFTSetup fftSetup;
-    DSPSplitComplex fftResult;
-    float *fftWindow;
-    float *fftBufferWindowed;
-    float *fftPrevMagnitudes;
-    float *fftMagnitudes;
+    FFTSetup fftSetup = nullptr;
+    DSPSplitComplex fftResult = {nullptr, nullptr};
+    float *fftWindow = nullptr;
+    float *fftBufferWindowed = nullptr;
+    float *fftPrevMagnitudes = nullptr;
+    float *fftMagnitudes = nullptr;
 
     void paintVerticalLine(uint32_t* bits, size_t x, const float* magnitudes, size_t numBins);
     void paintInterpolatedVerticalLines(uint32_t* bits, size_t x, const float* prevMagnitudes, const float* currMagnitudes, size_t numBins, size_t numLines);
@@ -182,7 +190,7 @@ private:
     uint32_t getMatlabRgb(float ordinal);
 
     int filterLength = 101;
-    float* filter;
+    float* filter = nullptr;
     void createLowPassFIRFilter();
 
 };

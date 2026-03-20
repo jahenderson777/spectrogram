@@ -19,27 +19,12 @@ Plugin::Plugin(const clap_host* host)
         &descriptor, host)
         , running(false)
 {
-    audioBuffer.resize(bufferSize, 0.0f);
-    
-
-    fftSetup = vDSP_create_fftsetup(log2f(fftSize), kFFTRadix2);
-    fftResult.realp = (float*)malloc(fftSize/2 * sizeof(float));
-    fftResult.imagp = (float*)malloc(fftSize/2 * sizeof(float));
-    fftWindow = (float*)malloc(fftSize * sizeof(float));
-    fftBufferWindowed = (float*)malloc(fftSize * sizeof(float));
-
-    fftPrevMagnitudes = (float*)malloc(fftSize/2 * sizeof(float));
-    fftMagnitudes = (float*)malloc(fftSize/2 * sizeof(float));
-
-    filter = (float*)malloc(filterLength * sizeof(float));
-    createLowPassFIRFilter();
-
-    vDSP_hann_window(fftWindow, fftSize, vDSP_HANN_NORM);
 }
 
 Plugin::~Plugin()
 {
-    vDSP_destroy_fftsetup(fftSetup);
+    // Defensive cleanup in case deactivate() was not called.
+    if (fftSetup) vDSP_destroy_fftsetup(fftSetup);
     free(fftResult.realp);
     free(fftResult.imagp);
     free(fftWindow);
@@ -129,7 +114,46 @@ bool Plugin::activate(double sampleRate, uint32_t /*minFrameCount*/, uint32_t /*
     const auto fadeLengthInMs = 5;
     fadeLengthInSamples_ = samplesInOneMs * fadeLengthInMs;
 
+    audioBuffer.resize(bufferSize, 0.0f);
+    fftBuffer.resize(fftSize, 0.0f);
+    bufferIndex = 0;
+    fftX = 0;
+
+    fftSetup = vDSP_create_fftsetup(log2f(fftSize), kFFTRadix2);
+    fftResult.realp = (float*)malloc(fftSize / 2 * sizeof(float));
+    fftResult.imagp = (float*)malloc(fftSize / 2 * sizeof(float));
+    fftWindow = (float*)malloc(fftSize * sizeof(float));
+    fftBufferWindowed = (float*)malloc(fftSize * sizeof(float));
+    fftPrevMagnitudes = (float*)malloc(fftSize / 2 * sizeof(float));
+    fftMagnitudes = (float*)malloc(fftSize / 2 * sizeof(float));
+
+    memset(fftPrevMagnitudes, 0, fftSize / 2 * sizeof(float));
+    memset(fftMagnitudes, 0, fftSize / 2 * sizeof(float));
+
+    vDSP_hann_window(fftWindow, fftSize, vDSP_HANN_NORM);
+
+    filter = (float*)malloc(filterLength * sizeof(float));
+    createLowPassFIRFilter();
+
     return true;
+}
+
+void Plugin::deactivate() noexcept
+{
+    if (fftSetup) {
+        vDSP_destroy_fftsetup(fftSetup);
+        fftSetup = nullptr;
+    }
+    free(fftResult.realp);  fftResult.realp = nullptr;
+    free(fftResult.imagp);  fftResult.imagp = nullptr;
+    free(fftWindow);        fftWindow = nullptr;
+    free(fftBufferWindowed); fftBufferWindowed = nullptr;
+    free(fftPrevMagnitudes); fftPrevMagnitudes = nullptr;
+    free(fftMagnitudes);    fftMagnitudes = nullptr;
+    free(filter);           filter = nullptr;
+
+    fftBuffer.clear();
+    audioBuffer.clear();
 }
 
 clap_process_status Plugin::process(const clap_process* process) noexcept
@@ -194,7 +218,7 @@ clap_process_status Plugin::process(const clap_process* process) noexcept
         bufferIndex = (bufferIndex + 1) % bufferSize;
     }*/
 
-    if (gui && gui->bits) 
+    if (gui && gui->bits && fftSetup && !fftBuffer.empty()) 
     {
         float* fftInput =  process->audio_inputs[0].data32[0];
         size_t remaining = process->frames_count;
@@ -506,7 +530,6 @@ bool Plugin::guiCreate(const char *api, bool isFloating) noexcept {
     /*if (_host.canUseTimerSupport()) {
         _host.timerSupportRegister(200, &timerId);
     }*/
-    fftBuffer.resize(fftSize, 0.0f);
     GUICreate((Plugin *) this);
     running = true;
     startAnimationLoop(10);
@@ -596,6 +619,21 @@ void Plugin::stopAnimationLoop() {
     if (animationThread.joinable()) {
         animationThread.join();
     }
+}
+
+bool Plugin::stateSave(const clap_ostream *stream) noexcept {
+    // Write the gain value as a double.
+    const auto written = stream->write(stream, &gain_, sizeof(gain_));
+    return written == sizeof(gain_);
+}
+
+bool Plugin::stateLoad(const clap_istream *stream) noexcept {
+    double value = 0.0;
+    const auto read = stream->read(stream, &value, sizeof(value));
+    if (read != sizeof(value))
+        return false;
+    gain_ = value;
+    return true;
 }
 
 bool Plugin::notePortsInfo (uint32_t index, bool isInput, clap_note_port_info *info) const noexcept

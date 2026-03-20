@@ -33,7 +33,6 @@ spectrogram_plugin/
     ├── Utils.h                 # dB <-> gain helpers (header-only)
     ├── gui_mac.cpp             # macOS GUI glue (C++, included into Plugin.cpp)
     ├── gui_mac.m               # Cocoa NSView implementation (Objective-C)
-    ├── gui_mac.o               # Precompiled gui_mac.m object (must be rebuilt manually)
     ├── gui_w32.cpp             # Win32 GUI stub (NOT currently buildable)
     ├── gui_x11.cpp             # X11 GUI stub (NOT currently buildable)
     └── tinycolormap.hpp        # Header-only colormap library (MIT, vendored)
@@ -58,18 +57,7 @@ spectrogram_plugin/
 - CMake ≥ 3.25
 - Internet access on first build (FetchContent clones clap and clap-helpers)
 
-### Step 1 — Compile the Objective-C file
-
-`CMakeLists.txt` currently adds `src/gui_mac.o` as a **precompiled object**
-rather than letting CMake compile `gui_mac.m` directly (known issue #2 below).
-You must regenerate this object whenever `gui_mac.m` changes:
-
-```bash
-# From the repo root
-gcc -c src/gui_mac.m -g -o src/gui_mac.o
-```
-
-### Step 2 — Configure and build
+### Configure and build
 
 ```bash
 cmake -S . -B build
@@ -78,7 +66,7 @@ cmake --build build
 
 Output: `build/Spectrogram.clap/` (macOS bundle)
 
-### Step 3 — Install for testing
+### Install for testing
 
 ```bash
 cmake --install build
@@ -178,19 +166,16 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
    array initialised with a lambda that called `std::abs` on floats, which is
    not `constexpr` in Apple's libc++.  Both were dead code; removed entirely.
 
-### 🔴 Open — Build / Infrastructure
+4. **Precompiled `gui_mac.o` in CMake** — added `OBJC` (and `C`) to the
+   project languages and listed `src/gui_mac.m` directly in `add_library(...)`,
+   removing the `set(GUI_OBJ ...)` workaround.
 
-4. **Precompiled `gui_mac.o` in CMake**: `CMakeLists.txt` references
-   `src/gui_mac.o` as a pre-built object.  Changes to `gui_mac.m` are silently
-   ignored until the object is manually rebuilt.
-   **Fix**: add `enable_language(OBJC)` to CMakeLists.txt and list
-   `src/gui_mac.m` directly in `add_library(...)`, removing the
-   `set(GUI_OBJ ...)` workaround.
+5. **Slow scan time** — moved FFT setup (`vDSP_create_fftsetup`), buffer
+   allocations, and Hann window computation from the constructor to
+   `activate()`, with teardown in `deactivate()`.  Scan time dropped from
+   ~236 ms to ~14 ms.
 
-5. **Slow scan time**: `clap-validator` reports ~264 ms to scan, exceeding the
-   100 ms target.  Likely caused by `vDSP_create_fftsetup` running in the
-   constructor, which is called during metadata scanning.
-   **Fix**: move FFT setup to `activate()` and tear it down in `deactivate()`.
+
 
 ### 🔴 Open — Correctness
 
@@ -200,12 +185,7 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
    **Fix**: use a double-buffer (ping-pong), or extend `bufferMutex` coverage
    to include `drawRect` reads.
 
-7. **`fftBuffer` only resized in `guiCreate`**: If the host calls `process()`
-   before `guiCreate()` (legal in CLAP), `fftBuffer` is empty.  The
-   `if (gui && gui->bits)` guard prevents a crash but silently drops audio data.
-   **Fix**: resize `fftBuffer` in `activate()` and reset `bufferIndex = 0` there.
-
-8. **`std::async` misuse in animation loop**: `startAnimationLoop` fires
+7. **`std::async` misuse in animation loop**: `startAnimationLoop` fires
    `GUIPaint` via `std::async(std::launch::async, ...)` but discards the
    `std::future`.  The discarded future's destructor blocks until completion,
    which can cause overlapping paint calls if the frame takes longer than the
@@ -215,32 +195,32 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
 
 ### 🟡 Open — Dead Code / Cleanliness
 
-9. **`audioBuffer` is allocated but never used**: A 32 768-sample circular
+8. **`audioBuffer` is allocated but never used**: A 32 768-sample circular
    buffer and its mutex exist but audio samples go directly into `fftBuffer`.
    **Fix**: remove `audioBuffer`, `bufferSize`, and the related `bufferMutex`
    lock in `paint()` (replace with a dedicated `fftMutex` if needed).
 
-10. **`filter` / `createLowPassFIRFilter` is unused**: A 101-tap FIR filter is
-    computed in the constructor but the `vDSP_desamp` call is commented out.
+9. **`filter` / `createLowPassFIRFilter` is unused**: A 101-tap FIR filter is
+    computed in `activate()` but the `vDSP_desamp` call is commented out.
     **Fix**: remove both if there's no near-term plan to use them.
 
-11. **Large pile of commented-out code**: Several alternative
+10. **Large pile of commented-out code**: Several alternative
     `paintVerticalLine` implementations, a waveform renderer, and a multi-band
     FFT sketch remain in `Plugin.cpp`.
     **Fix**: delete them (they're in git history if ever needed).
 
-12. **Unused variables generating compiler warnings**: `note`, `nextEvent`,
+11. **Unused variables generating compiler warnings**: `note`, `nextEvent`,
     `prevHighMag`, `currHighMag`, `verticalScale` — all flagged by `-Wunused`.
     **Fix**: remove or use each one.
 
 ### 🟡 Open — Missing Features
 
-13. **Gain parameter is a no-op**: The plugin exposes a "Gain" parameter with
+12. **Gain parameter is a no-op**: The plugin exposes a "Gain" parameter with
     proper dB display but never applies it to the audio signal.
     **Fix**: after the pass-through copy in `process()`, multiply output samples
     by `gain_` (use `vDSP_vsmul`).
 
-14. **Win32 / X11 GUI stubs are broken**: `gui_w32.cpp` and `gui_x11.cpp`
+13. **Win32 / X11 GUI stubs are broken**: `gui_w32.cpp` and `gui_x11.cpp`
     reference `MyPlugin`, `PluginPaint`, `PluginProcessMouseDrag`, etc. —
     names that no longer exist.  They are copy-pasted from an older template.
 
@@ -248,19 +228,13 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
 
 ## Recommended Next Steps (Priority Order)
 
-1. **Fix CMake to compile `gui_mac.m` directly** (issue #4) — eliminates the
-   fragile manual compile step and makes the build fully reproducible.
+1. **Clean up dead code** (issues #8, #9, #10) — makes the file readable.
 
-2. **Clean up dead code** (issues #9, #10, #11) — makes the file readable.
+2. **Fix compiler warnings** (issue #11) — remove unused variables.
 
-3. **Fix compiler warnings** (issue #12) — remove unused variables.
+3. **Fix the animation loop** (issue #7) — drop the `std::async` wrapper.
 
-4. **Move FFT setup and `fftBuffer` resize to `activate()`** (issues #5, #7) —
-   fixes scan-time warning and the missing-buffer edge case together.
-
-5. **Fix the animation loop** (issue #8) — drop the `std::async` wrapper.
-
-6. **Add double-buffering** (issue #6) — the most involved fix; needed for
+4. **Add double-buffering** (issue #6) — the most involved fix; needed for
    correctness under a strict host.
 
 ---
@@ -291,8 +265,7 @@ plugin's CLAP API conformance without needing a DAW.  A copy lives at
 ```
 
 Expected result: **0 failures** (some tests are skipped because the plugin does
-not implement optional extensions like `clap.state`).  There is currently one
-warning about scan time exceeding 100 ms (see issue #5).
+not implement optional extensions like `clap.state`).
 
 Run this after any change to `Factory.cpp`, `Plugin.h`, or the CLAP entry point
 before loading the plugin in a DAW.
