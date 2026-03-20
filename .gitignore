@@ -1,7 +1,40 @@
-# OS's
-.DS_Store
+# ── Build output ──────────────────────────────────────────────────────────────
+build/
+build-*/
+out/
 
-# IDE's
+# Compiled objects / binaries
+*.o
+*.a
+*.dylib
+*.so
+*.dll
+*.clap
+
+# CMake generated files (if building in-source, which we avoid)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.xcodeproj/
+*.xcworkspace/
+*.swp
+*.swo
+*~
+.clangd/
+.cache/
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
 *.txt.user
-.idea/*
-build*
