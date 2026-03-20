@@ -611,15 +611,6 @@ bool Plugin::notePortsInfo (uint32_t index, bool isInput, clap_note_port_info *i
     return false;
 }
 
-uint32_t Plugin::mapValueToColor(float value) {
-    // Clamp value between 0 and 1
-    value = std::min(1.0f, std::max(0.0f, value));
-    // Scale to colormap index
-    int index = static_cast<int>(value * 255);
-    auto color = jetColormap[index];
-    return ((uint32_t)(color[0] * 255) << 16) | ((uint32_t)(color[1] * 255) << 8) | (uint32_t)(color[2] * 255);
-}
-
 uint32_t Plugin::getMatlabRgb(float ordinal)
 {
     uint8_t r, g, b;

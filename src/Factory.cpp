@@ -47,8 +47,10 @@ const clap_plugin_factory factoryStruct =
     .create_plugin = ::createPluginInstance,
 };
 
-const void* getFactory(const char* /*factory_id*/)
+const void* getFactory(const char* factory_id)
 {
+    if (strcmp(factory_id, CLAP_PLUGIN_FACTORY_ID) != 0)
+        return nullptr;
     return &factoryStruct;
 }
 

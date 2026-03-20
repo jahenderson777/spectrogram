@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(ClapPluginCppTemplate LANGUAGES CXX VERSION 0.1)
+project(Spectrogram LANGUAGES CXX VERSION 1.0.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,7 +20,7 @@ add_library(${PROJECT_NAME} MODULE
 )
 
 target_link_libraries(${PROJECT_NAME} PUBLIC clap clap-helpers)
-target_link_libraries(ClapPluginCppTemplate PRIVATE "-framework Accelerate")
+target_link_libraries(Spectrogram PRIVATE "-framework Accelerate")
 
 if (APPLE)
     target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -pedantic -Wno-unused-parameter)
@@ -34,11 +34,19 @@ if (APPLE)
     set_target_properties(${PROJECT_NAME} PROPERTIES
         BUNDLE True
         BUNDLE_EXTENSION clap
-        MACOSX_BUNDLE_GUI_IDENTIFIER org.earthics.${PROJECT_NAME}
+        MACOSX_BUNDLE_GUI_IDENTIFIER org.earthics.Spectrogram
         MACOSX_BUNDLE_BUNDLE_NAME ${PROJECT_NAME}
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
-        MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/cmake/ClapPluginCppTemplate.plist.in
+        MACOSX_BUNDLE_COPYRIGHT "Copyright © 2025 Alexander Henderson"
+        MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/cmake/Spectrogram.plist.in
+    )
+
+    # Install to the user CLAP folder so hosts (e.g. Bitwig) can find the plugin.
+    # Run with: cmake --install build
+    install(DIRECTORY "${CMAKE_BINARY_DIR}/${PROJECT_NAME}.clap"
+        DESTINATION "$ENV{HOME}/Library/Audio/Plug-Ins/CLAP"
+        USE_SOURCE_PERMISSIONS
     )
 endif()
 

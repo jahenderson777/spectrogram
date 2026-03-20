@@ -39,7 +39,7 @@ public:
         .manual_url = "",
         .support_url = "",
         .version = "1.0.0",
-        .description = "Spectrogram",
+        .description = "A real-time audio spectrogram visualiser",
         .features = features
     };
 
@@ -177,18 +177,8 @@ private:
     void paintVerticalLine(uint32_t* bits, size_t x, const float* magnitudes, size_t numBins);
     void paintInterpolatedVerticalLines(uint32_t* bits, size_t x, const float* prevMagnitudes, const float* currMagnitudes, size_t numBins, size_t numLines);
 
-    static constexpr std::array<std::array<float, 3>, 256> jetColormap = [] {
-        std::array<std::array<float, 3>, 256> colormap = {};
-        for (int i = 0; i < 256; ++i) {
-            float r = std::min(1.0f, std::max(0.0f, 1.5f - std::abs(4.0f * (i / 255.0f) - 3.0f)));
-            float g = std::min(1.0f, std::max(0.0f, 1.5f - std::abs(4.0f * (i / 255.0f) - 2.0f)));
-            float b = std::min(1.0f, std::max(0.0f, 1.5f - std::abs(4.0f * (i / 255.0f) - 1.0f)));
-            colormap[i] = {r, g, b};
-        }
-        return colormap;
-    }();
 
-    uint32_t mapValueToColor(float value);
+
     uint32_t getMatlabRgb(float ordinal);
 
     int filterLength = 101;
