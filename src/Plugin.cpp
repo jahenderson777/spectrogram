@@ -129,6 +129,7 @@ bool Plugin::activate(double sampleRate, uint32_t /*minFrameCount*/, uint32_t /*
 
     memset(fftPrevMagnitudes, 0, fftSize / 2 * sizeof(float));
     memset(fftMagnitudes, 0, fftSize / 2 * sizeof(float));
+    paintPrevMagnitudes_.assign(fftSize / 2, 0.0f);
 
     vDSP_hann_window(fftWindow, fftSize, vDSP_HANN_NORM);
 
@@ -183,87 +184,57 @@ clap_process_status Plugin::process(const clap_process* process) noexcept
         }
     }
 
-    std::lock_guard<std::mutex> lock(bufferMutex);
-
-    if (fftX >= GUI_WIDTH) 
-        fftX = 0;
-
-    // Handle MIDI events
+    // Handle MIDI events (audio thread — no GUI work here)
     for (uint32_t i = 0; i < process->in_events->size(process->in_events); ++i) {
         const clap_event_header_t *event = process->in_events->get(process->in_events, i);
         if (event->type == CLAP_EVENT_MIDI) {
             const clap_event_midi_t *midiEvent = reinterpret_cast<const clap_event_midi_t*>(event);
-            uint8_t status = midiEvent->data[0] & 0xF0;
-            uint8_t note = midiEvent->data[1];
+            uint8_t status   = midiEvent->data[0] & 0xF0;
             uint8_t velocity = midiEvent->data[2];
 
-            // Check for note-on message
             if (status == 0x90 && velocity > 0) {
-                if (gui && gui->bits) 
-                    paintRectangle(gui->bits, fftX, GUI_WIDTH, 0, GUI_HEIGHT, 0x000000, 0x000000);
-                bufferIndex = 0; // Reset buffer index on note-on
-                fftX = 0;
-                //std::fill(audioBuffer.begin(), audioBuffer.end(), 0.0f); // Clear the buffer
-                break; // Exit the loop as we handled the trigger
+                bufferIndex = 0; // Reset FFT accumulator on note-on
+                // Tell the paint thread to clear the display and reset the draw cursor
+                std::lock_guard<std::mutex> lock(fftQueueMutex_);
+                fftQueue_.push({std::vector<float>(), true});
+                break;
             }
         }
     }
 
-
-
-
-    /*for (uint32_t i = 0; i < process->frames_count; ++i)
+    // Accumulate samples, run FFT, and push magnitude frames for the paint thread
+    if (fftSetup && !fftBuffer.empty())
     {
-        audioBuffer[bufferIndex] = process->audio_inputs[0].data32[0][i];
-        bufferIndex = (bufferIndex + 1) % bufferSize;
-    }*/
-
-    if (gui && gui->bits && fftSetup && !fftBuffer.empty()) 
-    {
-        float* fftInput =  process->audio_inputs[0].data32[0];
+        float* fftInput = process->audio_inputs[0].data32[0];
         size_t remaining = process->frames_count;
         while (remaining > 0) {
-            size_t toCopy = std::min(remaining, fftSize - bufferIndex);
+            size_t toCopy = std::min(remaining, (size_t)(fftSize - bufferIndex));
             std::copy(fftInput, fftInput + toCopy, fftBuffer.begin() + bufferIndex);
             bufferIndex += toCopy;
-            fftInput += toCopy;
-            remaining -= toCopy;
+            fftInput    += toCopy;
+            remaining   -= toCopy;
 
             if (bufferIndex == fftSize) {
-
-                // Do 16 512 fft's and plot each
-
-
-                // Apply window
-                // vDSP_vmul(fftBuffer.data(), 1, fftWindow, 1, fftBuffer.data(), 1, fftSize);
-                for (size_t i = 0; i < fftSize; ++i) {
+                // Apply Hann window
+                for (size_t i = 0; i < fftSize; ++i)
                     fftBufferWindowed[i] = fftBuffer.data()[i] * fftWindow[i];
-                }
 
-                //vDSP_desamp(fftBuffer.data(), 1.0f, filter, fftBufferWindowed, fftSize, filterLength);
-
-                
                 // Perform FFT
                 vDSP_ctoz((DSPComplex*)fftBufferWindowed, 2, &fftResult, 1, fftSize / 2);
                 vDSP_fft_zrip(fftSetup, &fftResult, 1, log2f(fftSize), FFT_FORWARD);
-                
-                // Convert to magnitude
-                //float magnitudes[fftSize / 2];
+
+                // Convert to magnitude (dB)
                 vDSP_zvmags(&fftResult, 1, fftMagnitudes, 1, fftSize / 2);
                 float zero = 1.0f;
                 vDSP_vdbcon(fftMagnitudes, 1, &zero, fftMagnitudes, 1, fftSize / 2, 0);
-                
-                // Generate grayscale strip
-                //paintVerticalLine(gui->bits, fftX, magnitudes, fftSize / 2);
-                paintInterpolatedVerticalLines(gui->bits, fftX, fftPrevMagnitudes, fftMagnitudes, fftSize / 2, 3);
-                fftX += 3;
 
-                for (size_t i = 0; i < fftSize / 2; ++i) {
-                    fftPrevMagnitudes[i] = fftMagnitudes[i];
+                // Hand the magnitude data off to the paint thread via the queue
+                {
+                    std::lock_guard<std::mutex> lock(fftQueueMutex_);
+                    fftQueue_.push({std::vector<float>(fftMagnitudes, fftMagnitudes + fftSize / 2), false});
                 }
-                
-                
-                // Slide buffer for overlap
+
+                // Slide buffer for 75% overlap
                 std::copy(fftBuffer.begin() + fftOverlap, fftBuffer.end(), fftBuffer.begin());
                 bufferIndex = fftSize - fftOverlap;
             }
@@ -448,56 +419,47 @@ void Plugin::paintRectangle(uint32_t *bits, uint32_t l, uint32_t r, uint32_t t, 
 }
 
 void Plugin::paint(uint32_t *bits) {
-    //if (fftX <= 3)
-	    //paintRectangle(bits, 0, GUI_WIDTH, 0, GUI_HEIGHT, 0x000000, 0x000000);
+    if (!bits) return;
 
-        // Draw the waveform
-    std::lock_guard<std::mutex> lock(bufferMutex);
-
-    if (audioBuffer.empty()) {
-        return;
+    // Drain the FFT frame queue that was filled by the audio thread.
+    // All pixel-buffer writes happen here, on the GUI/animation thread.
+    std::vector<FFTFrame> frames;
+    {
+        std::lock_guard<std::mutex> lock(fftQueueMutex_);
+        while (!fftQueue_.empty()) {
+            frames.push_back(std::move(fftQueue_.front()));
+            fftQueue_.pop();
+        }
     }
 
-    // Calculate the center line for the waveform
-    int centerY = GUI_HEIGHT / 2;
+    if (frames.empty()) return; // nothing to paint; don't bother locking
 
-    // Scale the audio samples to fit in the GUI height
-    float verticalScale = static_cast<float>(centerY);
+    // Lock the pixel buffer while we write so that drawRect: (main thread)
+    // cannot read a partially-updated frame.
+    if (gui) pthread_mutex_lock(&gui->bitsMutex);
 
-    /*for (size_t i = 0; i < bufferSize - 1; ++i) {
-        int x1 = static_cast<int>((static_cast<float>(i) / bufferSize) * GUI_WIDTH);
-        int y1 = centerY - static_cast<int>(audioBuffer[(0 + i) % bufferSize] * verticalScale);
-        int x2 = static_cast<int>((static_cast<float>(i + 1) / bufferSize) * GUI_WIDTH);
-        int y2 = centerY - static_cast<int>(audioBuffer[(0 + i + 1) % bufferSize] * verticalScale);
+    for (auto& frame : frames) {
+        if (frame.reset) {
+            // MIDI note-on: clear the display and reset the draw cursor
+            paintRectangle(bits, 0, GUI_WIDTH, 0, GUI_HEIGHT, 0x000000, 0x000000);
+            fftX = 0;
+            std::fill(paintPrevMagnitudes_.begin(), paintPrevMagnitudes_.end(), 0.0f);
+        } else if (!frame.magnitudes.empty()) {
+            // Lazy-initialise the previous-frame buffer if needed
+            if (paintPrevMagnitudes_.size() != frame.magnitudes.size())
+                paintPrevMagnitudes_.assign(frame.magnitudes.size(), 0.0f);
 
-        // Draw line from (x1, y1) to (x2, y2)
-        // Simple Bresenham's line algorithm
-        int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
-        int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
-        int err = dx + dy, e2;
-
-        while (true) {
-            if (x1 >= 0 && x1 < GUI_WIDTH && y1 >= 0 && y1 < GUI_HEIGHT) {
-                bits[y1 * GUI_WIDTH + x1] = 0x000000; // Black color for the waveform
-            }
-
-            if (x1 == x2 && y1 == y2) break;
-            e2 = 2 * err;
-            if (e2 >= dy) {
-                err += dy;
-                x1 += sx;
-            }
-            if (e2 <= dx) {
-                err += dx;
-                y1 += sy;
-            }
+            if (fftX >= GUI_WIDTH) fftX = 0;
+            paintInterpolatedVerticalLines(bits, fftX,
+                                           paintPrevMagnitudes_.data(),
+                                           frame.magnitudes.data(),
+                                           frame.magnitudes.size(), 3);
+            fftX += 3;
+            paintPrevMagnitudes_ = std::move(frame.magnitudes);
         }
-    }*/
+    }
 
-    
-
-	//paintRectangle(bits, 10, 40, 10, 40 + x, 0x000000, 0xC0C0C0);
-    //x++;
+    if (gui) pthread_mutex_unlock(&gui->bitsMutex);
 }
 
 void Plugin::processMouseDrag(int32_t x, int32_t y) {
@@ -532,7 +494,7 @@ bool Plugin::guiCreate(const char *api, bool isFloating) noexcept {
     }*/
     GUICreate((Plugin *) this);
     running = true;
-    startAnimationLoop(10);
+    startAnimationLoop(30);
     return true;
 }
 
@@ -541,7 +503,7 @@ void Plugin::guiDestroy() noexcept {
     //_host.timerSupportUnregister(timerId);
 
     stopAnimationLoop();
-    
+
     GUIDestroy((Plugin *) this);
 
     
@@ -607,9 +569,7 @@ void Plugin::startAnimationLoop(int fps) {
     animationThread = std::thread([this, interval]() {
         while (running) {
             std::this_thread::sleep_for(interval);
-            (void) std::async(std::launch::async, [this] { 
-                GUIPaint(this, true); 
-            });
+            GUIPaint(this, true);
         }
     });
 }

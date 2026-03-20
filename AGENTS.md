@@ -59,24 +59,29 @@ spectrogram_plugin/
 - CMake ≥ 3.25
 - Internet access on first build (FetchContent clones clap and clap-helpers)
 
-### Configure and build
+### First-time configure
+
+Only needed once, or after changing `CMakeLists.txt`:
 
 ```bash
 cmake -S . -B build
-cmake --build build
 ```
 
-Output: `build/Spectrogram.clap/` (macOS bundle)
+### Build and install
 
-### Install for testing
+The normal day-to-day command — run this after every code change:
 
 ```bash
-cmake --install build
+cmake --build build && cmake --install build
 ```
 
-This copies `Spectrogram.clap` to `~/Library/Audio/Plug-Ins/CLAP/` (defined in
-`CMakeLists.txt` via `install(DIRECTORY ...)`).  After installing, trigger a
-plugin rescan in your DAW.
+This compiles the plugin, **auto-increments the build number** (written to
+`src/build_number.h` and displayed in the GUI overlay), copies
+`Spectrogram.clap` to `~/Library/Audio/Plug-Ins/CLAP/`, and triggers a
+plugin rescan in your DAW.  No manual steps are needed for `gui_mac.m` —
+CMake compiles Objective-C directly (`LANGUAGES C CXX OBJC`).
+
+Output bundle: `build/Spectrogram.clap/`
 
 **Note on the legacy bundle**: A second copy is kept at
 `~/Library/Audio/Plug-Ins/CLAP/ClapPluginCppTemplate.clap` for compatibility
@@ -98,10 +103,13 @@ Called by the host on the real-time audio thread.  It:
    - Applies a **Hann window** via `vDSP_hann_window`.
    - Runs a **real-to-complex FFT** (`vDSP_fft_zrip`, size 2048).
    - Converts to power in dB (`vDSP_zvmags` + `vDSP_vdbcon`).
-   - Calls `paintInterpolatedVerticalLines` — paints directly into the GUI
-     pixel buffer (3 columns per frame, interpolated from the previous frame).
+   - Pushes an `FFTFrame` (magnitude vector) onto `fftQueue_` (protected by
+     `fftQueueMutex_`) for the paint thread to consume.
    - Slides `fftBuffer` forward by `fftOverlap` (512 samples = 75% overlap).
-4. On MIDI note-on, the display resets (black fill, `fftX = 0`).
+4. On MIDI note-on, pushes a reset `FFTFrame` (empty magnitudes, `reset=true`)
+   onto `fftQueue_` and resets the FFT accumulator.
+
+The audio thread does **no pixel writes** and holds no GUI state.
 
 **FFT parameters:**
 
@@ -112,13 +120,26 @@ Called by the host on the real-time audio thread.  It:
 | Window          | Hann (normalised) |
 | Columns per FFT | 3 (interpolated)  |
 
-### GUI / paint thread
+### Paint thread / `Plugin::paint()`
 
-The plugin spawns a background thread (`animationThread`) at 10 fps that calls
-`GUIPaint`, which forwards to `plugin->paint()` and then schedules a Cocoa
-`setNeedsDisplay`.  `Plugin::paint` currently only acquires `bufferMutex`; the
-actual spectrogram data is written by the audio thread directly into the pixel
-buffer inside `process()`.
+`Plugin::paint()` is the sole writer of `gui->bits`.  It drains `fftQueue_`,
+and for each frame either clears the buffer (reset frame) or calls
+`paintInterpolatedVerticalLines` (3 columns, interpolated from the previous
+frame) and advances `fftX`.
+
+`paint()` is currently called from two places:
+- **`MacInputEvent`** — on mouse events (main thread).
+- **`GUIPaint`** — called by the animation thread (see below).
+
+### Animation thread (`startAnimationLoop`)
+
+The plugin spawns a background `std::thread` (`animationThread`) that wakes at
+10 fps, calls `GUIPaint` (which calls `paint()` then `MacPaint`), and goes back
+to sleep.
+
+> ⚠️ **Currently disabled for crash diagnostics.**  `startAnimationLoop` /
+> `stopAnimationLoop` are commented out in `guiCreate` / `guiDestroy`.
+> Redraws therefore only happen on mouse events.  See open issue #6.
 
 ### Pixel buffer
 
@@ -154,53 +175,70 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
 
 ### ✅ Fixed
 
+- **Precompiled `gui_mac.o` in CMake**: `CMakeLists.txt` previously referenced
+  `src/gui_mac.o` as a pre-built object; changes to `gui_mac.m` were silently
+  ignored.  Fixed by adding `LANGUAGES OBJC` to the project and listing
+  `src/gui_mac.m` directly in `add_library(...)`.
 
+- **`std::async` misuse in animation loop**: `startAnimationLoop` previously
+  fired `GUIPaint` via `std::async(std::launch::async, ...)` and discarded the
+  `std::future`, causing the destructor to block and overlapping paint calls.
+  Fixed by calling `GUIPaint` directly in the loop body.
 
+- **Audio thread doing pixel writes**: `process()` previously called
+  `paintInterpolatedVerticalLines` and managed `fftX` directly.  Replaced with
+  a producer/consumer model: the audio thread pushes `FFTFrame` structs onto
+  `fftQueue_`; all pixel writes happen in `Plugin::paint()` on the paint thread.
 
 ### 🔴 Open — Correctness
 
-6. **Thread safety of the pixel buffer**: The audio thread writes to
-   `gui->bits` (holding `bufferMutex`), and the Cocoa `drawRect` reads from it
-   on the main thread without any lock.
-   **Fix**: use a double-buffer (ping-pong), or extend `bufferMutex` coverage
-   to include `drawRect` reads.
+6. **Animation thread disabled (crash diagnostics)**: `startAnimationLoop` /
+   `stopAnimationLoop` are currently commented out in `guiCreate` /
+   `guiDestroy` while investigating a `BitwigAudioEngine` `EXC_BAD_ACCESS`
+   crash that appeared after the producer/consumer refactor.  Redraws only
+   happen on mouse events until this is resolved and the thread is re-enabled.
 
-7. **`std::async` misuse in animation loop**: `startAnimationLoop` fires
-   `GUIPaint` via `std::async(std::launch::async, ...)` but discards the
-   `std::future`.  The discarded future's destructor blocks until completion,
-   which can cause overlapping paint calls if the frame takes longer than the
-   interval.
-   **Fix**: call `GUIPaint` directly in the loop body (it only calls
-   `setNeedsDisplayInRect`, which is cheap and thread-safe on macOS).
+7. **`MacPaint` / `MacSetDebugText` called from a background thread**: When the
+   animation thread is re-enabled, `GUIPaint` calls both `MacSetDebugText` and
+   `MacPaint` (`[NSView setNeedsDisplayInRect:]`) from a non-main thread.
+   AppKit requires all view operations on the main thread.
+   **Fix**: wrap both calls in `dispatch_async(dispatch_get_main_queue(), ^{ … })`
+   inside `gui_mac.m`.
+
+8. **Thread safety of the pixel buffer**: The animation thread writes to
+   `gui->bits` inside `Plugin::paint()`, while Cocoa's `drawRect:` reads the
+   same buffer on the main thread without any lock.
+   **Fix**: use a double-buffer (ping-pong), or guard `drawRect:` reads with
+   the same mutex used in `paint()`.
 
 ### 🟡 Open — Dead Code / Cleanliness
 
-8. **`audioBuffer` is allocated but never used**: A 32 768-sample circular
+9. **`audioBuffer` is allocated but never used**: A 32 768-sample circular
    buffer and its mutex exist but audio samples go directly into `fftBuffer`.
    **Fix**: remove `audioBuffer`, `bufferSize`, and the related `bufferMutex`
    lock in `paint()` (replace with a dedicated `fftMutex` if needed).
 
-9. **`filter` / `createLowPassFIRFilter` is unused**: A 101-tap FIR filter is
+10. **`filter` / `createLowPassFIRFilter` is unused**: A 101-tap FIR filter is
     computed in `activate()` but the `vDSP_desamp` call is commented out.
     **Fix**: remove both if there's no near-term plan to use them.
 
-10. **Large pile of commented-out code**: Several alternative
+11. **Large pile of commented-out code**: Several alternative
     `paintVerticalLine` implementations, a waveform renderer, and a multi-band
     FFT sketch remain in `Plugin.cpp`.
     **Fix**: delete them (they're in git history if ever needed).
 
-11. **Unused variables generating compiler warnings**: `note`, `nextEvent`,
-    `prevHighMag`, `currHighMag`, `verticalScale` — all flagged by `-Wunused`.
+12. **Unused variables generating compiler warnings**: `nextEvent`,
+    `prevHighMag`, `currHighMag` — flagged by `-Wunused`.
     **Fix**: remove or use each one.
 
 ### 🟡 Open — Missing Features
 
-12. **Gain parameter is a no-op**: The plugin exposes a "Gain" parameter with
+13. **Gain parameter is a no-op**: The plugin exposes a "Gain" parameter with
     proper dB display but never applies it to the audio signal.
     **Fix**: after the pass-through copy in `process()`, multiply output samples
     by `gain_` (use `vDSP_vsmul`).
 
-13. **Win32 / X11 GUI stubs are broken**: `gui_w32.cpp` and `gui_x11.cpp`
+14. **Win32 / X11 GUI stubs are broken**: `gui_w32.cpp` and `gui_x11.cpp`
     reference `MyPlugin`, `PluginPaint`, `PluginProcessMouseDrag`, etc. —
     names that no longer exist.  They are copy-pasted from an older template.
 
@@ -208,14 +246,20 @@ This adds a frequency-dependent brightness boost and a constant floor offset.
 
 ## Recommended Next Steps (Priority Order)
 
-1. **Clean up dead code** (issues #8, #9, #10) — makes the file readable.
+1. **Diagnose and fix the animation-thread crash** (issue #6) — re-enable the
+   animation loop once the root cause of the `BitwigAudioEngine` crash is
+   confirmed.
 
-2. **Fix compiler warnings** (issue #11) — remove unused variables.
+2. **Dispatch AppKit calls to the main thread** (issue #7) — wrap
+   `setNeedsDisplayInRect:` and `MacSetDebugText` in `dispatch_async` so the
+   animation thread is safe to use.
 
-3. **Fix the animation loop** (issue #7) — drop the `std::async` wrapper.
+3. **Add double-buffering** (issue #8) — needed for pixel-buffer correctness
+   once the animation thread is active again.
 
-4. **Add double-buffering** (issue #6) — the most involved fix; needed for
-   correctness under a strict host.
+4. **Clean up dead code** (issues #9, #10, #11) — makes the file readable.
+
+5. **Fix compiler warnings** (issue #12) — remove unused variables.
 
 ---
 

@@ -1,14 +1,16 @@
 #include "build_number.h"
 #include <cstdio>
+#include <pthread.h>
 
 #define GUI_API CLAP_WINDOW_API_COCOA
 
 struct GUI {
-	void *mainView;
-	uint32_t *bits;
+	void        *mainView;
+	uint32_t    *bits;
+	pthread_mutex_t bitsMutex; // guards bits[] between paint() and drawRect:
 };
 
-extern "C" void *MacInitialise(Plugin *plugin, uint32_t *bits, uint32_t width, uint32_t height);
+extern "C" void *MacInitialise(Plugin *plugin, uint32_t *bits, pthread_mutex_t *bitsLock, uint32_t width, uint32_t height);
 extern "C" void MacDestroy(void *mainView);
 extern "C" void MacSetParent(void *_mainView, void *_parentView);
 extern "C" void MacSetVisible(void *_mainView, bool show);
@@ -29,14 +31,16 @@ static void GUIPaint(Plugin *plugin, bool internal) {
 static void GUICreate(Plugin *plugin) {
 	assert(!plugin->gui);
 	plugin->gui = (GUI *) calloc(1, sizeof(GUI));
+	pthread_mutex_init(&plugin->gui->bitsMutex, nullptr);
 	plugin->gui->bits = (uint32_t *) calloc(1, GUI_WIDTH * GUI_HEIGHT * 4);
 	plugin->paint(plugin->gui->bits);
-	plugin->gui->mainView = MacInitialise(plugin, plugin->gui->bits, GUI_WIDTH, GUI_HEIGHT);
+	plugin->gui->mainView = MacInitialise(plugin, plugin->gui->bits, &plugin->gui->bitsMutex, GUI_WIDTH, GUI_HEIGHT);
 }
 
 static void GUIDestroy(Plugin *plugin) {
 	assert(plugin->gui);
 	MacDestroy(plugin->gui->mainView);
+	pthread_mutex_destroy(&plugin->gui->bitsMutex);
 	free(plugin->gui->bits);
 	free(plugin->gui);
 	plugin->gui = nullptr;

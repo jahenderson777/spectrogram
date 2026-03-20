@@ -5,6 +5,7 @@
 #include <chrono>
 #include <future>
 #include <vector>
+#include <queue>
 #include <mutex>
 #include <Accelerate/Accelerate.h>
 #include <array>
@@ -184,6 +185,19 @@ private:
 
     void paintVerticalLine(uint32_t* bits, size_t x, const float* magnitudes, size_t numBins);
     void paintInterpolatedVerticalLines(uint32_t* bits, size_t x, const float* prevMagnitudes, const float* currMagnitudes, size_t numBins, size_t numLines);
+
+    // A single FFT result frame produced by the audio thread and consumed by the paint thread.
+    struct FFTFrame {
+        std::vector<float> magnitudes; // empty when reset == true
+        bool reset = false;            // if true: clear display and reset fftX
+    };
+
+    // Queue of frames produced by the audio thread, drained by paint().
+    std::queue<FFTFrame> fftQueue_;
+    std::mutex           fftQueueMutex_;
+
+    // Previous-frame magnitudes used for inter-frame interpolation, owned by the paint thread.
+    std::vector<float> paintPrevMagnitudes_;
 
 
 
